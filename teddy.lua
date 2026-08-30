@@ -1,7 +1,8 @@
 -- ============================================
 -- Teddy.lua - Roblox Task Manager 🧸
 -- Optimized for game development
--- v2.1 - Async / DataStore support
+-- v2.2 - Async / DataStore support
+-- Bugfixes: pause name collision, batch deadlock, stop/restart race on async tasks
 -- ============================================
 -- ⚠️ REQUIRES: Roblox/Luau with task library
 -- ============================================
@@ -36,7 +37,7 @@ function Teddy:mk(cfg) -- make/add
 	self.n = self.n + 1
 	local id = self.n
 
-	local task = {
+	local newTask = {
 		id = id,
 		nm = cfg.name or "T" .. id,
 		p = cfg.priority or 0,
@@ -57,8 +58,8 @@ function Teddy:mk(cfg) -- make/add
 		le = 0 -- last exec
 	}
 
-	self.t[id] = task
-	self:_emit("add", task)
+	self.t[id] = newTask
+	self:_emit("add", newTask)
 	return id
 end
 
@@ -83,7 +84,7 @@ function Teddy:run(id)
 	return self:is(id, S.RUN)
 end
 
-function Teddy:pause(id)
+function Teddy:isPaused(id)
 	return self:is(id, S.PAUSE)
 end
 
@@ -145,13 +146,22 @@ function Teddy:_run(id) -- execute
 	local t = self.t[id]
 	if not t then return false end
 
-	if not t.c then
+	if not t.c or t.s == S.SKIP then
+		-- Generation counter: neu task bi stop roi go lai, coroutine cu
+		-- (dang yield trong async) se bi bo qua nho gen mismatch.
+		t.gen = (t.gen or 0) + 1
+		local gen = t.gen
 		t.c = coroutine.create(function()
 			-- pcall preserves yielding in Luau, so callbacks that yield
 			-- on native async calls (DataStore GetAsync/SetAsync/UpdateAsync,
 			-- HttpService requests, etc.) work correctly here: the engine
 			-- resumes this coroutine directly once the async op completes.
 			local ok, res = pcall(t.f)
+			-- Task da bi stop (hoac da bi thay bang coroutine moi):
+			-- khong ghi de state, khong emit ok/err.
+			if t.s == S.SKIP or gen ~= t.gen then
+				return
+			end
 			if ok then
 				t.s = S.OK
 				t.r = res
@@ -169,6 +179,9 @@ function Teddy:_run(id) -- execute
 					t.c = nil
 					self:_emit("retry", t)
 					self:_sch(id, self:_delay(t))
+				else
+					-- Het retry van ERR: nhả dependency để task chờ không treo mãi
+					self:_deps(id)
 				end
 			end
 		end)
@@ -233,11 +246,13 @@ function Teddy:stop(id, force)
 		t.s = S.SKIP
 		t.c = nil
 		self:_emit("skip", t)
+		self:_deps(id)
 		return true
 	end
 
 	t.s = S.SKIP
 	self:_emit("skip", t)
+	self:_deps(id)
 	return true
 end
 
@@ -376,7 +391,11 @@ function Teddy:batch(items, fn, conc)
 			callback = function()
 				while #pend > 0 do
 					local v = table.remove(pend, 1)
-					table.insert(res, fn(v))
+					-- pcall de fn loi khong lam mat item / treo batch vinh vien
+					local ok, r = pcall(fn, v)
+					if ok then
+						table.insert(res, r)
+					end
 					done = done + 1
 					task.wait()
 				end
