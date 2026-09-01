@@ -16,7 +16,6 @@
 | State names | 7 chars avg | 4 chars avg | **43% shorter** |
 | API functions | Same | Same | **100% compat** |
 | Game performance | N/A | Optimal | ✓ |
-| Memory footprint | ~8KB | ~2.5KB | **-69%** |
 
 ---
 
